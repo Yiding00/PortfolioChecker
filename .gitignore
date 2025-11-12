@@ -1,0 +1,8 @@
+*test*
+*.streamlit*
+*.bat*
+*my*
+*portfolio.txt*
+*checker.ipynb*
+*__pycache__*
+*checker.py*

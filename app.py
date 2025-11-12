@@ -48,7 +48,21 @@ def authenticate_user(username, password):
     return True, user["username"]  # 返回用户名用于会话存储
 
 # 页面内容
-st.title("🔑 用户登录")
+st.title("Portfolio Checker")
+
+# 组合示例按钮（放在表单外，避免表单提交冲突）
+if st.button("组合示例 - 单击我查看示例", use_container_width=True, type="primary"):
+    # 直接使用默认账号1、密码1登录
+    success, result = authenticate_user("1", "1")
+    if success:
+        st.session_state["logged_in"] = True
+        st.session_state["current_username"] = result
+        st.session_state["username_input"] = result
+        st.success("已使用示例账号登录！即将跳转到个人页面...")
+        time.sleep(1)
+        st.switch_page("pages/show.py")
+    else:
+        st.error("示例账号登录失败，请检查配置")
 
 # 显示刚注册的提示（可选）
 if "just_registered" in st.session_state:
@@ -60,7 +74,7 @@ with st.form("login_form"):
     st.subheader("请输入登录信息")
     username = st.text_input("用户名/邮箱", placeholder="请输入用户名或邮箱")
     password = st.text_input("密码", type="password", placeholder="请输入密码")
-    remember_me = st.checkbox("记住我")  # 可后续扩展为持久化登录
+    # remember_me = st.checkbox("记住我")  # 可后续扩展为持久化登录
     
     submit = st.form_submit_button("登录", use_container_width=True)
     
@@ -72,25 +86,17 @@ with st.form("login_form"):
             if success:
                 # 登录成功，存储会话状态
                 st.session_state["logged_in"] = True
-                st.session_state["username"] = result  # 存储用户名
+                st.session_state["current_username"] = result  # 存储用户名
+                st.session_state["username_input"] = result
                 st.success("登录成功！即将跳转到个人页面...")
                 time.sleep(1)
-                st.switch_page("pages/registration_page.py")  # 跳转
+                st.switch_page("pages/show.py")  # 跳转
             else:
                 st.error(result)
 
-import os
-# 打印当前页面文件的路径
-st.write("当前登录页路径：", os.path.abspath(__file__))
-# 打印 Streamlit 基准目录（应是 PortfolioChecker/）
-st.write("Streamlit 基准目录：", os.getcwd())
-import os
-st.write("注册页是否存在：", os.path.exists(os.path.join(os.getcwd(), "PortfolioChecker/pages/registration_page.py")))
 
-target_path = os.path.join(os.getcwd(), "PortfolioChecker/pages/registration_page.py")
-st.write("目标注册页路径：", target_path)  # 确认此路径是否正确
 # 没有账号？跳转到注册页
 st.markdown("---")
 st.write("还没有账号？")
 if st.button("去注册", use_container_width=True):
-    st.switch_page("PortfolioChecker/pages/registration_page.py")
+    st.switch_page("pages/registration_page.py")

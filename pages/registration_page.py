@@ -49,8 +49,8 @@ def register_user(username, email, password, confirm_password):
         st.error("两次输入的密码不一致")
         return False
     
-    if len(password) < 6:
-        st.error("密码长度至少为6个字符")
+    if len(password) < 1:
+        st.error("密码长度至少为1个字符")
         return False
     
     if not is_valid_email(email):
@@ -97,7 +97,7 @@ with st.form("registration_form"):
     
     username = st.text_input("用户名", placeholder="请输入用户名")
     email = st.text_input("邮箱", placeholder="请输入您的邮箱地址")
-    password = st.text_input("密码", type="password", placeholder="请设置密码（至少6个字符）")
+    password = st.text_input("密码", type="password", placeholder="请设置密码（至少1个字符）")
     confirm_password = st.text_input("确认密码", type="password", placeholder="请再次输入密码")
     
     # 提交按钮

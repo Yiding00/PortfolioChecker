@@ -2,7 +2,6 @@ import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 import matplotlib as mpl
-import pymongo
 from pymongo import MongoClient
 import bcrypt
 from uuid import uuid4  # 用于生成唯一ID

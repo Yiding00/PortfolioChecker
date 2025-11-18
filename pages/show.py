@@ -4,13 +4,21 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 from pymongo import MongoClient
 import bcrypt
-from uuid import uuid4  # 用于生成唯一ID
+import uuid
+import hashlib
+import time
 
 # ========== 基础配置 ==========
 # 中文字体设置
 mpl.font_manager.fontManager.addfont('font/NotoSansSC-VariableFont_wght.ttf')
 plt.rcParams['font.sans-serif']=['Noto Sans SC']
 plt.rcParams['axes.unicode_minus']=False
+
+# 令牌配置（可自定义）
+TOKEN_EXPIRE_DAYS = 30  # 令牌有效期30天
+SECRET_KEY = st.secrets["secret_key"]["secret_key"]  # 加密密钥，建议替换为复杂随机字符串
+BASE_URL = st.secrets["base_url"]["base_url"]
+# BASE_URL = "http://localhost:8501"
 
 # MongoDB 连接
 @st.cache_resource
@@ -70,8 +78,112 @@ if "edit_categories" not in st.session_state:  # 控制分类编辑状态
     st.session_state.edit_categories = False
 if "temp_categories" not in st.session_state:  # 临时存储编辑中的分类数据
     st.session_state.temp_categories = None
+if "show_register" not in st.session_state:
+    st.session_state.show_register = False
 
 # ========== 核心函数 ==========
+def generate_secure_token(username):
+    """生成加密的用户唯一令牌"""
+    # 组合用户名、时间戳和随机字符串，确保唯一性
+    raw_token = f"{username}-{uuid.uuid4()}-{time.time()}"
+    # 加盐加密，提升安全性
+    salted_token = raw_token + SECRET_KEY
+    return hashlib.sha256(salted_token.encode()).hexdigest()
+
+def save_token_to_user(username, token=None):
+    if not token:
+        token = generate_secure_token(username)
+    expire_time = time.time() + TOKEN_EXPIRE_DAYS * 86400
+    # 执行更新并返回结果
+    result = users_collection.update_one(
+        {"username": username},
+        {"$set": {"login_token": token, "token_expire": expire_time}}
+    )
+    return token, expire_time
+
+def verify_user_token(token):
+    # 直接根据令牌查询用户（而非遍历所有用户）
+    user = users_collection.find_one({"login_token": token})
+    if not user:
+        st.warning("无效的登录令牌（未找到匹配用户）")
+        return None
+    # 检查过期时间
+    if time.time() > user.get("token_expire", 0):
+        st.warning("登录令牌已过期，请重新获取")
+        return None
+    return user["username"]
+
+def init_user_token(username):
+    """为旧用户初始化令牌字段"""
+    user = users_collection.find_one({"username": username})
+    if not user.get("login_token") or not user.get("token_expire"):
+        token, expire_time = save_token_to_user(username)
+        return token
+    return user["login_token"]
+
+# 在 check_password 函数中调用（用户密码登录成功后执行）
+def check_password():
+    """验证密码并设置登录状态"""
+    input_username = st.session_state.username_input.strip()
+    input_pwd = st.session_state.password_input.strip()
+    
+    if not input_username or not input_pwd:
+        st.error("用户名/邮箱和密码不能为空")
+        return
+    
+    user = users_collection.find_one({"$or": [
+        {"username": input_username},
+        {"email": input_username}
+    ]})
+    
+    if not user:
+        st.error("用户不存在，请检查用户名/邮箱")
+        return
+    
+    if bcrypt.checkpw(input_pwd.encode('utf-8'), user["password"]):
+        st.session_state.logged_in = True
+        st.session_state.current_username = user["username"]
+        # 🔴 新增：为旧用户初始化令牌
+        init_user_token(st.session_state.current_username)
+        st.session_state.username_input = ""
+        st.session_state.password_input = ""
+        st.success(f"欢迎回来，{st.session_state.current_username}！")
+    else:
+        st.error("密码错误，请重试")
+
+def register_user(username, password, email):
+    """用户注册（用于给新用户初始化令牌，已有用户可手动执行一次）"""
+    if users_collection.find_one({"username": username}):
+        return False, "用户名已存在"
+    # 密码加密存储
+    hashed_pwd = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+    # 生成并保存令牌
+    token, expire_time = save_token_to_user(username)
+    users_collection.insert_one({
+        "username": username,
+        "password": hashed_pwd,
+        "email": email,
+        "login_token": token,
+        "token_expire": expire_time,
+        "assets_info": {}
+    })
+    return True, f"注册成功！您的一键登录URL：{BASE_URL}/show?token={token}"
+
+def token_login():
+    """从URL获取令牌并验证登录"""
+    # 获取URL中的token参数
+    url_params = st.query_params
+    if "token" in url_params:
+        token = url_params["token"]
+        # st.write("当前URL参数：", token)
+        username = verify_user_token(token)
+        if username:
+            st.session_state.logged_in = True
+            st.session_state.current_username = username
+            st.success(f"令牌登录成功！欢迎回来，{username}！")
+            return True
+    return False
+
 def get_user_config_from_db():
     """从数据库读取用户配置，若无则使用默认值"""
     if not st.session_state.current_username:
@@ -209,6 +321,9 @@ def delete_asset_from_db(asset_name):
 
 # ========== 未登录状态 ==========
 if not st.session_state.logged_in:
+    # 优先尝试令牌登录
+    if token_login():
+        st.rerun()
     st.subheader("请输入账号密码访问内容")
     st.text_input(
         "用户名/邮箱",
@@ -222,11 +337,49 @@ if not st.session_state.logged_in:
         on_change=check_password,
         placeholder="请输入密码"
     )
+    # 登录后生成/更新令牌
+    if st.session_state.logged_in:
+        token, _ = save_token_to_user(st.session_state.current_username)
+        login_url = f"{BASE_URL}/show?token={token}"
+        st.success(f"登录成功！您的一键登录URL：{login_url}")
 
 # ========== 已登录状态 ==========
 else:
     st.set_page_config(page_title="资产组合查询器", layout="wide")
     st.title("📊 实时组合查询器")
+    
+    # 令牌管理区域
+    st.markdown("---")
+    st.subheader("🔗 一键登录管理")
+    current_user = users_collection.find_one({"username": st.session_state.current_username})
+    current_token = current_user.get("login_token", "")
+    if current_token:
+        login_url = f"{BASE_URL}/show?token={current_token}"
+        st.markdown(f"您的一键登录URL：")
+        st.code(login_url)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("刷新一键登录URL"):
+                new_token, _ = save_token_to_user(st.session_state.current_username)
+                new_login_url = f"{BASE_URL}/show?token={new_token}"
+                st.success(f"URL已刷新！新URL：{new_login_url}")
+                st.rerun()
+        with col2:
+            if st.button("禁用一键登录", type="secondary"):
+                users_collection.update_one(
+                    {"username": st.session_state.current_username},
+                    {"$set": {"login_token": "", "token_expire": 0}}
+                )
+                st.success("一键登录已禁用")
+                st.rerun()
+    else:
+        if st.button("生成一键登录URL"):
+            token, _ = save_token_to_user(st.session_state.current_username)
+            login_url = f"{BASE_URL}/show?token={token}"
+            st.success(f"一键登录URL已生成：{login_url}")
+            st.rerun()
+
     st.caption("自定义资产分类并管理标的，自动计算组合分布与调仓建议")
 
     # 实时读取配置
@@ -241,269 +394,6 @@ else:
             st.session_state.current_username = ""
             st.rerun()
         st.stop()
-
-
-    # ========== 显示当前持有的标的（更新备注展示） ==========
-    st.markdown("---")
-    st.subheader("📋 当前持有")
-
-    if not assets_info:
-        st.info("您暂无持有任何标的，可通过上方「添加新标的」功能录入资产")
-    else:
-        # 表头样式
-        st.markdown("""
-        <style>
-        .asset-row {display: flex; align-items: center; padding: 8px 0; border-bottom: 1px solid #eee;}
-        .asset-col {flex: 1; text-align: left; padding: 0 4px;}
-        .asset-col-2 {flex: 2; text-align: left; padding: 0 4px;}
-        .action-btn {flex: 1.2;}
-        </style>
-        """, unsafe_allow_html=True)
-        
-        # 表头
-        st.markdown("""
-        <div class="asset-row font-weight-bold">
-            <div class="asset-col-2">标的名称</div>
-            <div class="asset-col">标的代码</div>
-            <div class="asset-col">类型</div>
-            <div class="asset-col">持有份额</div>
-            <div class="asset-col-2">分类</div>
-            <div class="asset-col-2">备注</div>
-            <div class="asset-col action-btn">操作</div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # 标的列表
-        for asset_name, asset_detail in assets_info.items():
-            col1, col2, col3, col4, col5, col6, col7 = st.columns([2, 1.5, 1, 1.5, 2, 2, 1.5])
-            with col1:
-                st.write(asset_name)
-            with col2:
-                st.write(asset_detail.get("code", ""))
-            with col3:
-                st.write(asset_detail.get("type", ""))
-            with col4:
-                st.write(f"{asset_detail.get('amount', 0.0):.2f}")
-            with col5:
-                st.write(asset_detail.get("category", "").split("-")[1])  # 保持与添加功能一致的分类显示
-            with col6:
-                st.write(asset_detail.get("remark", "无"))
-            with col7:
-                btn_col1, btn_col2 = st.columns(2)
-                with btn_col1:
-                    edit_btn = st.button(
-                        "编辑",
-                        key=f"edit_{asset_name}",
-                        use_container_width=True,
-                        type="secondary"
-                    )
-                with btn_col2:
-                    delete_btn = st.button(
-                        "删除",
-                        key=f"delete_{asset_name}",
-                        use_container_width=True,
-                        type="secondary"
-                    )
-                
-                # 按钮点击逻辑
-                if edit_btn:
-                    st.session_state.edit_asset = asset_name
-                    st.session_state.show_edit = True
-                if delete_btn:
-                    st.session_state.delete_confirm = True
-                    st.session_state.asset_to_delete = asset_name
-
-    # ========== 添加新标的功能 ==========
-    # 初始隐藏添加表单，通过按钮控制显示状态
-    if 'show_add_asset' not in st.session_state:
-        st.session_state.show_add_asset = False
-
-    # 显示"添加新标的"按钮（始终可见，点击切换表单显示状态）
-    if st.button("➕ 添加新标的", type="primary"):
-        st.session_state.show_add_asset = not st.session_state.show_add_asset
-
-    # 当show_add_asset为True时，显示添加表单
-    if st.session_state.show_add_asset:
-        with st.form("add_asset_form"):
-            col1, col2 = st.columns(2)
-            with col1:
-                asset_name = st.text_input("标的名称", placeholder="例如：十年国债")
-                asset_code = st.text_input("标的代码（场内基金需要sh或sz）", placeholder="例如：sh511260")
-                asset_type = st.selectbox("标的类型", ["fund", "etf", "cash"])
-                asset_remark = st.text_input("备注", placeholder="例如：定投品种、风险提示等")
-            with col2:
-                hold_amount = st.number_input("持有份额", min_value=0.0, step=0.01, value=0.0)
-                # 分类下拉框关联当前配置的小类
-                asset_category = st.selectbox(
-                    "所属分类",
-                    options=list(target_ratio_sub.keys()),
-                    format_func=lambda x: x.split("-")[1]  # 只显示小类名称
-                )
-                submit_asset = st.form_submit_button("确认添加", use_container_width=True)
-            
-            if submit_asset:
-                new_asset = {
-                    asset_name: {
-                        "code": asset_code,
-                        "type": asset_type,
-                        "remark": asset_remark,  # 存储备注
-                        "amount": hold_amount,
-                        "category": asset_category
-                    }
-                }
-                if add_asset_to_db(new_asset):
-                    # 添加成功后自动隐藏表单
-                    st.session_state.show_add_asset = False
-                    st.rerun()
-
-    # ========== 统一编辑弹窗（包含所有信息修改） ==========
-    if st.session_state.get("show_edit", False) and st.session_state.get("edit_asset"):
-        asset_name = st.session_state.edit_asset
-        asset_detail = assets_info.get(asset_name, {})
-        original_name = asset_name  # 保存原始名称用于更新键值
-        
-        st.markdown("---")
-        with st.form(f"edit_asset_form_{asset_name}"):
-            st.subheader(f"✏️ 编辑标的信息")
-            
-            # 两列布局展示编辑项
-            col1, col2 = st.columns(2)
-            with col1:
-                # 标的名称（支持修改）
-                new_name = st.text_input(
-                    "标的名称",
-                    value=asset_name,
-                    placeholder="例如：十年国债"
-                )
-                
-                # 标的代码
-                new_code = st.text_input(
-                    "标的代码（场内基金需要sh或sz）",
-                    value=asset_detail.get("code", ""),
-                    placeholder="例如：sh511260"
-                )
-                
-                # 标的类型
-                new_type = st.selectbox(
-                    "标的类型",
-                    ["fund", "etf", "cash"],
-                    index=["fund", "etf", "cash"].index(asset_detail.get("type", "fund"))
-                )
-            
-            with col2:
-                # 持有份额
-                new_amount = st.number_input(
-                    "持有份额",
-                    min_value=0.0,
-                    step=0.01,
-                    value=asset_detail.get("amount", 0.0)
-                )
-                
-                # 所属分类
-                new_category = st.selectbox(
-                    "所属分类",
-                    options=list(target_ratio_sub.keys()),
-                    format_func=lambda x: x.split("-")[1],
-                    index=list(target_ratio_sub.keys()).index(asset_detail.get("category", list(target_ratio_sub.keys())[0]))
-                )
-            
-            # 备注（单独占一行）
-            new_remark = st.text_area(
-                "备注",
-                value=asset_detail.get("remark", ""),
-                placeholder="例如：定投品种、风险提示等",
-                key=f"remark_{asset_name}"
-            )
-            
-            # 操作按钮
-            col_submit, col_cancel = st.columns(2)
-            with col_submit:
-                submit_edit = st.form_submit_button(
-                    "确认保存",
-                    use_container_width=True,
-                    type="primary"
-                )
-            with col_cancel:
-                cancel_edit = st.form_submit_button(
-                    "取消",
-                    use_container_width=True,
-                    type="secondary"
-                )
-            
-            if submit_edit:
-                # 处理名称变更（需要删除旧键值）
-                if original_name != new_name:
-                    # 1. 先删除原始名称的记录
-                    delete_asset_from_db(original_name)
-                    # 2. 重新获取当前资产（因为已经删除了旧记录）
-                    current_assets, _ = get_user_config_from_db()
-                else:
-                    current_assets, _ = get_user_config_from_db()
-                
-                # 构建更新数据
-                updated_asset = {
-                    new_name: {
-                        "code": new_code,
-                        "type": new_type,
-                        "remark": new_remark,
-                        "amount": new_amount,
-                        "category": new_category
-                    }
-                }
-                
-                # 合并更新并保存
-                final_assets = {**current_assets,** updated_asset}
-                # 直接调用数据库更新（复用现有逻辑）
-                try:
-                    users_collection.update_one(
-                        {"username": st.session_state.current_username},
-                        {"$set": {"assets_info": final_assets}}
-                    )
-                    st.success("标的信息更新成功！")
-                    st.session_state.show_edit = False
-                    st.session_state.edit_asset = None
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"更新失败：{str(e)}")
-            
-            if cancel_edit:
-                st.session_state.show_edit = False
-                st.session_state.edit_asset = None
-                st.rerun()
-
-    # ========== 删除确认弹窗 ==========
-    if st.session_state.delete_confirm:
-        asset_name = st.session_state.asset_to_delete
-        st.markdown("---")
-        with st.form("delete_confirm_form"):
-            st.subheader("⚠️ 确认删除")
-            st.write(f"是否确定删除标的「**{asset_name}**」？此操作不可撤销。")
-            
-            col_confirm, col_cancel = st.columns(2)
-            with col_confirm:
-                confirm_delete = st.form_submit_button(
-                    "✅ 确认删除", 
-                    use_container_width=True, 
-                    type="primary"
-                )
-            with col_cancel:
-                cancel_delete = st.form_submit_button(
-                    "❌ 取消", 
-                    use_container_width=True, 
-                    type="secondary"
-                )
-            
-            if confirm_delete:
-                if delete_asset_from_db(asset_name):
-                    st.session_state.delete_confirm = False
-                    st.session_state.asset_to_delete = ""
-                    st.rerun()
-            
-            if cancel_delete:
-                st.session_state.delete_confirm = False
-                st.session_state.asset_to_delete = ""
-                st.rerun()
-
 
     # ========== 资产组合计算功能 ==========
     if st.button("开始计算资产组合", use_container_width=True, type="primary"):
@@ -796,6 +686,268 @@ else:
         # UTC时间+8小时=北京时间
         beijing_time = datetime.now()
         st.caption(f"更新时间：{beijing_time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    # ========== 显示当前持有的标的（更新备注展示） ==========
+    st.markdown("---")
+    st.subheader("📋 当前持有")
+
+    if not assets_info:
+        st.info("您暂无持有任何标的，可通过上方「添加新标的」功能录入资产")
+    else:
+        # 表头样式
+        st.markdown("""
+        <style>
+        .asset-row {display: flex; align-items: center; padding: 8px 0; border-bottom: 1px solid #eee;}
+        .asset-col {flex: 1; text-align: left; padding: 0 4px;}
+        .asset-col-2 {flex: 2; text-align: left; padding: 0 4px;}
+        .action-btn {flex: 1.2;}
+        </style>
+        """, unsafe_allow_html=True)
+        
+        # 表头
+        st.markdown("""
+        <div class="asset-row font-weight-bold">
+            <div class="asset-col-2">标的名称</div>
+            <div class="asset-col">标的代码</div>
+            <div class="asset-col">类型</div>
+            <div class="asset-col">持有份额</div>
+            <div class="asset-col-2">分类</div>
+            <div class="asset-col-2">备注</div>
+            <div class="asset-col action-btn">操作</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # 标的列表
+        for asset_name, asset_detail in assets_info.items():
+            col1, col2, col3, col4, col5, col6, col7 = st.columns([2, 1.5, 1, 1.5, 2, 2, 1.5])
+            with col1:
+                st.write(asset_name)
+            with col2:
+                st.write(asset_detail.get("code", ""))
+            with col3:
+                st.write(asset_detail.get("type", ""))
+            with col4:
+                st.write(f"{asset_detail.get('amount', 0.0):.2f}")
+            with col5:
+                st.write(asset_detail.get("category", "").split("-")[1])  # 保持与添加功能一致的分类显示
+            with col6:
+                st.write(asset_detail.get("remark", "无"))
+            with col7:
+                btn_col1, btn_col2 = st.columns(2)
+                with btn_col1:
+                    edit_btn = st.button(
+                        "编辑",
+                        key=f"edit_{asset_name}",
+                        use_container_width=True,
+                        type="secondary"
+                    )
+                with btn_col2:
+                    delete_btn = st.button(
+                        "删除",
+                        key=f"delete_{asset_name}",
+                        use_container_width=True,
+                        type="secondary"
+                    )
+                
+                # 按钮点击逻辑
+                if edit_btn:
+                    st.session_state.edit_asset = asset_name
+                    st.session_state.show_edit = True
+                if delete_btn:
+                    st.session_state.delete_confirm = True
+                    st.session_state.asset_to_delete = asset_name
+
+    # ========== 添加新标的功能 ==========
+    # 初始隐藏添加表单，通过按钮控制显示状态
+    if 'show_add_asset' not in st.session_state:
+        st.session_state.show_add_asset = False
+
+    # 显示"添加新标的"按钮（始终可见，点击切换表单显示状态）
+    if st.button("➕ 添加新标的", type="primary"):
+        st.session_state.show_add_asset = not st.session_state.show_add_asset
+
+    # 当show_add_asset为True时，显示添加表单
+    if st.session_state.show_add_asset:
+        with st.form("add_asset_form"):
+            col1, col2 = st.columns(2)
+            with col1:
+                asset_name = st.text_input("标的名称", placeholder="例如：十年国债")
+                asset_code = st.text_input("标的代码（场内基金需要sh或sz）", placeholder="例如：sh511260")
+                asset_type = st.selectbox("标的类型", ["fund", "etf", "cash"])
+                asset_remark = st.text_input("备注", placeholder="例如：定投品种、风险提示等")
+            with col2:
+                hold_amount = st.number_input("持有份额", min_value=0.0, step=0.01, value=0.0)
+                # 分类下拉框关联当前配置的小类
+                asset_category = st.selectbox(
+                    "所属分类",
+                    options=list(target_ratio_sub.keys()),
+                    format_func=lambda x: x.split("-")[1]  # 只显示小类名称
+                )
+                submit_asset = st.form_submit_button("确认添加", use_container_width=True)
+            
+            if submit_asset:
+                new_asset = {
+                    asset_name: {
+                        "code": asset_code,
+                        "type": asset_type,
+                        "remark": asset_remark,  # 存储备注
+                        "amount": hold_amount,
+                        "category": asset_category
+                    }
+                }
+                if add_asset_to_db(new_asset):
+                    # 添加成功后自动隐藏表单
+                    st.session_state.show_add_asset = False
+                    st.rerun()
+
+    # ========== 统一编辑弹窗（包含所有信息修改） ==========
+    if st.session_state.get("show_edit", False) and st.session_state.get("edit_asset"):
+        asset_name = st.session_state.edit_asset
+        asset_detail = assets_info.get(asset_name, {})
+        original_name = asset_name  # 保存原始名称用于更新键值
+        
+        st.markdown("---")
+        with st.form(f"edit_asset_form_{asset_name}"):
+            st.subheader(f"✏️ 编辑标的信息")
+            
+            # 两列布局展示编辑项
+            col1, col2 = st.columns(2)
+            with col1:
+                # 标的名称（支持修改）
+                new_name = st.text_input(
+                    "标的名称",
+                    value=asset_name,
+                    placeholder="例如：十年国债"
+                )
+                
+                # 标的代码
+                new_code = st.text_input(
+                    "标的代码（场内基金需要sh或sz）",
+                    value=asset_detail.get("code", ""),
+                    placeholder="例如：sh511260"
+                )
+                
+                # 标的类型
+                new_type = st.selectbox(
+                    "标的类型",
+                    ["fund", "etf", "cash"],
+                    index=["fund", "etf", "cash"].index(asset_detail.get("type", "fund"))
+                )
+            
+            with col2:
+                # 持有份额
+                new_amount = st.number_input(
+                    "持有份额",
+                    min_value=0.0,
+                    step=0.01,
+                    value=asset_detail.get("amount", 0.0)
+                )
+                
+                # 所属分类
+                new_category = st.selectbox(
+                    "所属分类",
+                    options=list(target_ratio_sub.keys()),
+                    format_func=lambda x: x.split("-")[1],
+                    index=list(target_ratio_sub.keys()).index(asset_detail.get("category", list(target_ratio_sub.keys())[0]))
+                )
+            
+            # 备注（单独占一行）
+            new_remark = st.text_area(
+                "备注",
+                value=asset_detail.get("remark", ""),
+                placeholder="例如：定投品种、风险提示等",
+                key=f"remark_{asset_name}"
+            )
+            
+            # 操作按钮
+            col_submit, col_cancel = st.columns(2)
+            with col_submit:
+                submit_edit = st.form_submit_button(
+                    "确认保存",
+                    use_container_width=True,
+                    type="primary"
+                )
+            with col_cancel:
+                cancel_edit = st.form_submit_button(
+                    "取消",
+                    use_container_width=True,
+                    type="secondary"
+                )
+            
+            if submit_edit:
+                # 处理名称变更（需要删除旧键值）
+                if original_name != new_name:
+                    # 1. 先删除原始名称的记录
+                    delete_asset_from_db(original_name)
+                    # 2. 重新获取当前资产（因为已经删除了旧记录）
+                    current_assets, _ = get_user_config_from_db()
+                else:
+                    current_assets, _ = get_user_config_from_db()
+                
+                # 构建更新数据
+                updated_asset = {
+                    new_name: {
+                        "code": new_code,
+                        "type": new_type,
+                        "remark": new_remark,
+                        "amount": new_amount,
+                        "category": new_category
+                    }
+                }
+                
+                # 合并更新并保存
+                final_assets = {**current_assets,** updated_asset}
+                # 直接调用数据库更新（复用现有逻辑）
+                try:
+                    users_collection.update_one(
+                        {"username": st.session_state.current_username},
+                        {"$set": {"assets_info": final_assets}}
+                    )
+                    st.success("标的信息更新成功！")
+                    st.session_state.show_edit = False
+                    st.session_state.edit_asset = None
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"更新失败：{str(e)}")
+            
+            if cancel_edit:
+                st.session_state.show_edit = False
+                st.session_state.edit_asset = None
+                st.rerun()
+
+    # ========== 删除确认弹窗 ==========
+    if st.session_state.delete_confirm:
+        asset_name = st.session_state.asset_to_delete
+        st.markdown("---")
+        with st.form("delete_confirm_form"):
+            st.subheader("⚠️ 确认删除")
+            st.write(f"是否确定删除标的「**{asset_name}**」？此操作不可撤销。")
+            
+            col_confirm, col_cancel = st.columns(2)
+            with col_confirm:
+                confirm_delete = st.form_submit_button(
+                    "✅ 确认删除", 
+                    use_container_width=True, 
+                    type="primary"
+                )
+            with col_cancel:
+                cancel_delete = st.form_submit_button(
+                    "❌ 取消", 
+                    use_container_width=True, 
+                    type="secondary"
+                )
+            
+            if confirm_delete:
+                if delete_asset_from_db(asset_name):
+                    st.session_state.delete_confirm = False
+                    st.session_state.asset_to_delete = ""
+                    st.rerun()
+            
+            if cancel_delete:
+                st.session_state.delete_confirm = False
+                st.session_state.asset_to_delete = ""
+                st.rerun()
+
 
     # ========== 分类配置功能（核心修改） ==========
     st.markdown("---")

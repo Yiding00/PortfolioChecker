@@ -7,6 +7,8 @@ import bcrypt
 import uuid
 import hashlib
 import time
+from data_utils.Ashare import *
+from data_utils.utils import get_fund_price
 
 # ========== 基础配置 ==========
 # 中文字体设置
@@ -143,7 +145,7 @@ def check_password():
     if bcrypt.checkpw(input_pwd.encode('utf-8'), user["password"]):
         st.session_state.logged_in = True
         st.session_state.current_username = user["username"]
-        # 🔴 新增：为旧用户初始化令牌
+        # 🔴 为旧用户初始化令牌
         init_user_token(st.session_state.current_username)
         st.session_state.username_input = ""
         st.session_state.password_input = ""
@@ -318,6 +320,309 @@ def delete_asset_from_db(asset_name):
     except Exception as e:
         st.error(f"删除失败：{str(e)}")
         return False
+    
+# ========== 资产组合计算功能 ==========
+def calculate_portfolio():
+    # 实时读取配置
+    assets_info, categories = get_user_config_from_db()
+    target_ratio, target_ratio_sub = flatten_categories(categories)
+
+    # 处理读取失败
+    if not categories:
+        st.error("获取配置失败，请重新登录")
+        if st.button("重新登录"):
+            st.session_state.logged_in = False
+            st.session_state.current_username = ""
+            st.rerun()
+        st.stop()
+
+    # 获取现有价值
+    A = {}
+    for name, info in assets_info.items():
+        try:
+            code = info["code"]
+            source = info["type"]
+            amount = info["amount"]
+            if source == "fund":
+                A[name] = get_fund_price(code, count=1)
+            elif source == "etf":
+                A[name] = get_price(code, frequency="5m", count=1)
+        except Exception as e:
+            st.warning(f"获取 {name} 数据失败：{e}")
+
+    # 计算当前价值
+    current_values = {}
+    for name, info in assets_info.items():
+        source = info["type"]
+        amount = info["amount"]
+        if source == "cash":
+            current_values[name] = amount
+        else:
+            if name in A and not A[name].empty:
+                latest_price = A[name]["close"].iloc[-1]
+                current_values[name] = amount * latest_price
+            else:
+                current_values[name] = 0.0
+
+    # 构建资产明细DataFrame
+    data = []
+    for name, info in assets_info.items():
+        data.append([
+            info["code"],
+            info["type"],
+            info["amount"],
+            info["category"],
+            info.get("remark", "无"),  # 显示备注
+            current_values[name]
+        ])
+    df = pd.DataFrame(data, index=assets_info.keys(),
+                        columns=["代码", "类型", "持有份额", "分类", "备注", "现有价值"])
+    df[["大类", "小类"]] = df["分类"].str.split("-", expand=True)
+
+    # 总资产计算
+    total_value = df["现有价值"].sum()
+
+    # 小类汇总与差额分析
+    sub_summary = df.groupby("分类")["现有价值"].sum()
+    sub_diff = {}
+    sub_diff_ratio = {}
+    for k, tar in target_ratio_sub.items():
+        target_value = total_value * tar
+        actual_value = sub_summary.get(k, 0)
+        sub_diff[k] = actual_value - target_value
+        sub_diff_ratio[k] = sub_diff[k] / target_value * 100 if target_value != 0 else 0
+
+    # 大类汇总与差额分析
+    cls_summary = df.groupby("大类")["现有价值"].sum()
+    cls_diff = {}
+    cls_diff_ratio = {}
+    for k, tar in target_ratio.items():
+        target_value = total_value * tar
+        actual_value = cls_summary.get(k, 0)
+        cls_diff[k] = actual_value - target_value
+        cls_diff_ratio[k] = cls_diff[k] / target_value * 100 if target_value != 0 else 0
+
+    # 结果展示
+    def highlight_diff(row):
+        val = float(row["差额比例"][:-1])
+        if val > 20:
+            return ["background-color: #ff9999;"] * len(row)
+        elif 10 < val <= 20:
+            ratio = (val - 10) / 10
+            r, g, b = 255, int(230 - ratio * 77), int(230 - ratio * 77)
+            return [f"background-color: rgb({r},{g},{b});"] * len(row)
+        elif val < -20:
+            return ["background-color: #99ccff;"] * len(row)
+        elif -20 <= val < -10:
+            ratio = (abs(val) - 10) / 10
+            r, g, b = int(230 - ratio * 77), int(240 - ratio * 36), 255
+            return [f"background-color: rgb({r},{g},{b});"] * len(row)
+        else:
+            return [""] * len(row)
+
+    st.markdown(f"### 投资组合总价值：{total_value:,.2f} 元")
+
+    # 小类目标对比
+    st.subheader("各小类目标对比")
+    data_sub = []
+    for k in target_ratio_sub:
+        target_ratio_temp = round(target_ratio_sub[k] * 100, 2)
+        current_ratio_temp = round(sub_summary.get(k, 0) / total_value * 100, 2)
+        current_amount_temp = round(sub_summary.get(k, 0), 2)
+        target_amount_temp = round(total_value * target_ratio_sub[k], 2)
+        diff_ratio_temp = round(sub_diff_ratio[k], 2)
+        diff_amount_temp = round(sub_diff[k], 2)
+        data_sub.append({
+            "现有金额": f"{current_amount_temp:.2f}",
+            "当前比例": f"{current_ratio_temp:.2f}%",
+            "目标金额": f"{target_amount_temp:.2f}",
+            "目标比例": f"{target_ratio_temp:.2f}%",
+            "差额金额": f"{diff_amount_temp:.2f}",
+            "差额比例": f"{diff_ratio_temp:.2f}%"
+        })
+    sub_table = pd.DataFrame(data_sub, index=target_ratio_sub.keys())
+    sub_table.index.name = "小类"
+    st.table(sub_table.style.apply(highlight_diff, axis=1))
+
+    # 大类目标对比
+    st.subheader("各大类目标对比")
+    cls_data = []
+    for k in target_ratio:
+        target_ratio_temp = round(target_ratio[k] * 100, 2)
+        current_ratio_temp = round(cls_summary.get(k, 0) / total_value * 100, 2)
+        current_amount_temp = round(cls_summary.get(k, 0), 2)
+        target_amount_temp = round(total_value * target_ratio[k], 2)
+        diff_ratio_temp = round(cls_diff_ratio[k], 2)
+        diff_amount_temp = round(cls_diff[k], 2)
+        cls_data.append({
+            "现有金额": f"{current_amount_temp:.2f}",
+            "当前比例": f"{current_ratio_temp:.2f}%",
+            "目标金额": f"{target_amount_temp:.2f}",
+            "目标比例": f"{target_ratio_temp:.2f}%",
+            "差额金额": f"{diff_amount_temp:.2f}",
+            "差额比例": f"{diff_ratio_temp:.2f}%"
+        })
+    cls_table = pd.DataFrame(cls_data, index=target_ratio.keys())
+    cls_table.index.name = "大类"
+    st.table(cls_table.style.apply(highlight_diff, axis=1))
+
+    # 资产明细
+    st.divider()
+    st.subheader("当前资产明细（含价值）")
+    st.dataframe(df[["代码", "类型", "持有份额", "现有价值", "分类", "备注"]], width='stretch')
+
+    # 调仓建议
+    st.markdown("---")
+    st.subheader("📊 调仓建议（再平衡，阈值20%）")
+
+    if df.empty or not target_ratio_sub:
+        st.info("请先添加标的并设置目标配置比例，以生成调仓建议")
+    else:
+        total_value = df["现有价值"].sum()
+        if total_value == 0:
+            st.warning("所有标的现有价值为0，无法计算调仓建议")
+        else:
+            # 1. 计算当前比例（基于现有价值）和目标偏差
+            category_value = df.groupby("分类")["现有价值"].sum().to_dict()
+            current_ratio = {k: v / total_value for k, v in category_value.items()}
+            
+            adjustment = {}
+            for category in target_ratio_sub:
+                if category == "机动-现金":
+                    continue
+                target = target_ratio_sub[category]
+                current = current_ratio.get(category, 0.0)
+                diff_ratio = target - current  # 比例偏差（正数需增持，负数需减持）
+                diff_value = total_value * diff_ratio  # 价值偏差（元）
+                
+                # 计算偏差百分比（过滤<20%的调整，阈值改为20%）
+                deviation_pct = abs(diff_ratio) / target if target > 0 else 1.0
+                adjustment[category] = {
+                    "目标比例": target,
+                    "当前比例": current,
+                    "比例偏差": diff_ratio,
+                    "价值偏差": diff_value,
+                    "偏差百分比": deviation_pct
+                }
+            
+            # 过滤偏差<20%的分类（只保留需要调仓的）
+            significant_adj = {
+                k: v for k, v in adjustment.items() 
+                if v["偏差百分比"] >= 0.2 and v.get("类型") != "cash"  # 增加排除cash的条件
+            }
+            
+            if not significant_adj:
+                st.success("所有资产类别偏差均小于20%，当前配置合理，无需调仓")
+            else:
+                # 2. 大类偏离度展示
+                st.markdown("### 大类资产偏离度（偏差≥20%）")
+                major_deviation = {}
+                for category, adj in significant_adj.items():
+                    major = category.split("-")[0]
+                    major_deviation[major] = major_deviation.get(major, 0.0) + adj["偏差百分比"]
+                
+                major_cols = st.columns(len(major_deviation))
+                for i, (major, dev) in enumerate(major_deviation.items()):
+                    with major_cols[i]:
+                        st.metric(major, f"偏差 {dev:.0%}", "需调仓")
+                
+                # 3. 详细调仓建议
+                st.markdown("### 具体调仓操作建议")
+                for category, adj in significant_adj.items():
+                    major, minor = category.split("-")
+                    with st.expander(f"{major} - {minor}（偏差 {adj['偏差百分比']:.0%}）", expanded=True):
+                        # 小类层面数据
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.write("目标比例")
+                            st.subheader(f"{adj['目标比例']:.0%}")
+                        with col2:
+                            st.write("当前比例")
+                            st.subheader(f"{adj['当前比例']:.0%}")
+                        with col3:
+                            st.write("价值调整")
+                            if adj["价值偏差"] > 0:
+                                st.subheader(f"🔼 增持 {adj['价值偏差']:.2f}元")
+                            else:
+                                st.subheader(f"🔽 减持 {abs(adj['价值偏差']):.2f}元")
+                        
+                        # 标的层面建议（优化卖出取整逻辑）
+                        st.write("涉及标的调整（手数）：")
+                        category_assets = df[df["分类"] == category].index.tolist()
+                        if category_assets:
+                            category_total = df.loc[category_assets, "现有价值"].sum()
+                            for asset_name in category_assets:
+                                # 基础信息获取
+                                asset_type = df.loc[asset_name, "类型"]  # etf=场内，fund/cash=场外
+                                current_shares = df.loc[asset_name, "持有份额"]  # 当前持有份额
+                                unit_value = df.loc[asset_name, "现有价值"] / current_shares if current_shares > 0 else 1.0  # 单位净值
+                                
+                                # 计算单个标的需调整的价值（按比例分摊）
+                                asset_value_ratio = df.loc[asset_name, "现有价值"] / category_total
+                                asset_adjust_value = adj["价值偏差"] * asset_value_ratio
+                                
+                                # 计算调整份额（核心优化点）
+                                adjust_shares = 0
+                                shares_info = ""
+                                if unit_value > 0:
+                                    base_shares = asset_adjust_value / unit_value  # 理论基础份额
+                                    
+                                    # 区分场内/场外 + 增持/减持，优化取整逻辑
+                                    if asset_type == "etf":  # 场内标的（100份整数倍）
+                                        if base_shares > 0:  # 增持
+                                            # 向上取整到100的整数倍（确保达到最低增持需求）
+                                            adjust_shares = (base_shares // 100) * 100
+                                            shares_info = ""
+                                        elif base_shares < 0:  # 减持
+                                            # 向下取整到100的整数倍（不超过预期减持量）
+                                            adjust_shares = (base_shares // 100 + 1) * 100
+                                            # 额外校验：不超过当前持有份额（防止卖空）
+                                            if abs(adjust_shares) > current_shares:
+                                                adjust_shares = -( (current_shares // 100) * 100 )
+                                            shares_info = ""
+                                    elif asset_type == "fund":  # 场外标的（精确到小数点后2位）
+                                        if base_shares > 0:  # 增持
+                                            adjust_shares = round(base_shares, 2)
+                                            shares_info = ""
+                                        elif base_shares < 0:  # 减持
+                                            adjust_shares = round(base_shares, 2)
+                                            # 额外校验：不超过当前持有份额
+                                            if abs(adjust_shares) > current_shares:
+                                                adjust_shares = -round(current_shares, 2)
+                                            shares_info = ""
+                                
+                                # 显示调仓建议
+                                if adjust_shares > 0:
+                                    st.info(
+                                        f"- 「{asset_name}」建议增持 {adjust_shares} 份额 {shares_info}\n"
+                                        f"  对应价值：{adjust_shares * unit_value:.2f}元（单位净值：{unit_value:.2f}元）"
+                                    )
+                                elif adjust_shares < 0:
+                                    st.warning(
+                                        f"- 「{asset_name}」建议减持 {abs(adjust_shares)} 份额 {shares_info}\n"
+                                        f"  对应价值：{abs(adjust_shares) * unit_value:.2f}元（当前持有：{current_shares:.2f}份）"
+                                    )
+                        else:
+                            st.info(f"- 该小类暂无标的，建议新增符合「{minor}」分类的标的")
+
+    # 资产分布图表
+    st.subheader("小类资产分布")
+    fig1, ax1 = plt.subplots(figsize=(8, 6))
+    ax1.pie(sub_summary.values, labels=sub_summary.index, autopct="%1.1f%%", startangle=90)
+    ax1.axis("equal")
+    st.pyplot(fig1)
+
+    st.subheader("大类资产分布")
+    fig2, ax2 = plt.subplots(figsize=(8, 6))
+    ax2.pie(cls_summary.values, labels=cls_summary.index, autopct="%1.1f%%", startangle=90)
+    ax2.axis("equal")
+    st.pyplot(fig2)
+    from datetime import datetime, timedelta
+
+    # UTC时间+8小时=北京时间
+    beijing_time = datetime.now()
+    st.caption(f"更新时间：{beijing_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    return assets_info, categories, target_ratio, target_ratio_sub
 
 # ========== 未登录状态 ==========
 if not st.session_state.logged_in:
@@ -348,343 +653,47 @@ else:
     st.set_page_config(page_title="资产组合查询器", layout="wide")
     st.title("📊 实时组合查询器")
     
-    # 令牌管理区域
-    st.markdown("---")
-    st.subheader("🔗 一键登录管理")
-    current_user = users_collection.find_one({"username": st.session_state.current_username})
-    current_token = current_user.get("login_token", "")
-    if current_token:
-        login_url = f"{BASE_URL}/show?token={current_token}"
-        st.markdown(f"您的一键登录URL：")
-        st.code(login_url)
+    # ========== 一键登录管理（封装为下拉按钮） ==========
+    with st.expander("🔗 一键登录管理", expanded=False):  # expanded=False 默认折叠
+        current_user = users_collection.find_one({"username": st.session_state.current_username})
+        current_token = current_user.get("login_token", "")
         
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("刷新一键登录URL"):
-                new_token, _ = save_token_to_user(st.session_state.current_username)
-                new_login_url = f"{BASE_URL}/show?token={new_token}"
-                st.success(f"URL已刷新！新URL：{new_login_url}")
-                st.rerun()
-        with col2:
-            if st.button("禁用一键登录", type="secondary"):
-                users_collection.update_one(
-                    {"username": st.session_state.current_username},
-                    {"$set": {"login_token": "", "token_expire": 0}}
-                )
-                st.success("一键登录已禁用")
-                st.rerun()
-    else:
-        if st.button("生成一键登录URL"):
-            token, _ = save_token_to_user(st.session_state.current_username)
-            login_url = f"{BASE_URL}/show?token={token}"
-            st.success(f"一键登录URL已生成：{login_url}")
-            st.rerun()
-
-
-    # 实时读取配置
-    assets_info, categories = get_user_config_from_db()
-    target_ratio, target_ratio_sub = flatten_categories(categories)
-
-    # 处理读取失败
-    if not categories:
-        st.error("获取配置失败，请重新登录")
-        if st.button("重新登录"):
-            st.session_state.logged_in = False
-            st.session_state.current_username = ""
-            st.rerun()
-        st.stop()
-
-    # ========== 资产组合计算功能 ==========
-    if st.button("开始计算资产组合", use_container_width=True, type="primary"):
-        from data_utils.Ashare import *
-        from data_utils.utils import get_fund_price
-
-        # 获取现有价值
-        A = {}
-        for name, info in assets_info.items():
-            try:
-                code = info["code"]
-                source = info["type"]
-                amount = info["amount"]
-                if source == "fund":
-                    A[name] = get_fund_price(code, count=1)
-                elif source == "etf":
-                    A[name] = get_price(code, frequency="5m", count=1)
-            except Exception as e:
-                st.warning(f"获取 {name} 数据失败：{e}")
-
-        # 计算当前价值
-        current_values = {}
-        for name, info in assets_info.items():
-            source = info["type"]
-            amount = info["amount"]
-            if source == "cash":
-                current_values[name] = amount
-            else:
-                if name in A and not A[name].empty:
-                    latest_price = A[name]["close"].iloc[-1]
-                    current_values[name] = amount * latest_price
-                else:
-                    current_values[name] = 0.0
-
-        # 构建资产明细DataFrame
-        data = []
-        for name, info in assets_info.items():
-            data.append([
-                info["code"],
-                info["type"],
-                info["amount"],
-                info["category"],
-                info.get("remark", "无"),  # 显示备注
-                current_values[name]
-            ])
-        df = pd.DataFrame(data, index=assets_info.keys(),
-                          columns=["代码", "类型", "持有份额", "分类", "备注", "现有价值"])
-        df[["大类", "小类"]] = df["分类"].str.split("-", expand=True)
-
-        # 总资产计算
-        total_value = df["现有价值"].sum()
-
-        # 小类汇总与差额分析
-        sub_summary = df.groupby("分类")["现有价值"].sum()
-        sub_diff = {}
-        sub_diff_ratio = {}
-        for k, tar in target_ratio_sub.items():
-            target_value = total_value * tar
-            actual_value = sub_summary.get(k, 0)
-            sub_diff[k] = actual_value - target_value
-            sub_diff_ratio[k] = sub_diff[k] / target_value * 100 if target_value != 0 else 0
-
-        # 大类汇总与差额分析
-        cls_summary = df.groupby("大类")["现有价值"].sum()
-        cls_diff = {}
-        cls_diff_ratio = {}
-        for k, tar in target_ratio.items():
-            target_value = total_value * tar
-            actual_value = cls_summary.get(k, 0)
-            cls_diff[k] = actual_value - target_value
-            cls_diff_ratio[k] = cls_diff[k] / target_value * 100 if target_value != 0 else 0
-
-        # 结果展示
-        def highlight_diff(row):
-            val = float(row["差额比例"][:-1])
-            if val > 20:
-                return ["background-color: #ff9999;"] * len(row)
-            elif 10 < val <= 20:
-                ratio = (val - 10) / 10
-                r, g, b = 255, int(230 - ratio * 77), int(230 - ratio * 77)
-                return [f"background-color: rgb({r},{g},{b});"] * len(row)
-            elif val < -20:
-                return ["background-color: #99ccff;"] * len(row)
-            elif -20 <= val < -10:
-                ratio = (abs(val) - 10) / 10
-                r, g, b = int(230 - ratio * 77), int(240 - ratio * 36), 255
-                return [f"background-color: rgb({r},{g},{b});"] * len(row)
-            else:
-                return [""] * len(row)
-
-        st.markdown(f"### 投资组合总价值：{total_value:,.2f} 元")
-
-        # 小类目标对比
-        st.subheader("各小类目标对比")
-        data_sub = []
-        for k in target_ratio_sub:
-            target_ratio_temp = round(target_ratio_sub[k] * 100, 2)
-            current_ratio_temp = round(sub_summary.get(k, 0) / total_value * 100, 2)
-            current_amount_temp = round(sub_summary.get(k, 0), 2)
-            target_amount_temp = round(total_value * target_ratio_sub[k], 2)
-            diff_ratio_temp = round(sub_diff_ratio[k], 2)
-            diff_amount_temp = round(sub_diff[k], 2)
-            data_sub.append({
-                "现有金额": f"{current_amount_temp:.2f}",
-                "当前比例": f"{current_ratio_temp:.2f}%",
-                "目标金额": f"{target_amount_temp:.2f}",
-                "目标比例": f"{target_ratio_temp:.2f}%",
-                "差额金额": f"{diff_amount_temp:.2f}",
-                "差额比例": f"{diff_ratio_temp:.2f}%"
-            })
-        sub_table = pd.DataFrame(data_sub, index=target_ratio_sub.keys())
-        sub_table.index.name = "小类"
-        st.table(sub_table.style.apply(highlight_diff, axis=1))
-
-        # 大类目标对比
-        st.subheader("各大类目标对比")
-        cls_data = []
-        for k in target_ratio:
-            target_ratio_temp = round(target_ratio[k] * 100, 2)
-            current_ratio_temp = round(cls_summary.get(k, 0) / total_value * 100, 2)
-            current_amount_temp = round(cls_summary.get(k, 0), 2)
-            target_amount_temp = round(total_value * target_ratio[k], 2)
-            diff_ratio_temp = round(cls_diff_ratio[k], 2)
-            diff_amount_temp = round(cls_diff[k], 2)
-            cls_data.append({
-                "现有金额": f"{current_amount_temp:.2f}",
-                "当前比例": f"{current_ratio_temp:.2f}%",
-                "目标金额": f"{target_amount_temp:.2f}",
-                "目标比例": f"{target_ratio_temp:.2f}%",
-                "差额金额": f"{diff_amount_temp:.2f}",
-                "差额比例": f"{diff_ratio_temp:.2f}%"
-            })
-        cls_table = pd.DataFrame(cls_data, index=target_ratio.keys())
-        cls_table.index.name = "大类"
-        st.table(cls_table.style.apply(highlight_diff, axis=1))
-
-        # 资产明细
-        st.divider()
-        st.subheader("当前资产明细（含价值）")
-        st.dataframe(df[["代码", "类型", "持有份额", "现有价值", "分类", "备注"]], width='stretch')
-
-        # 调仓建议
-        st.markdown("---")
-        st.subheader("📊 调仓建议（再平衡，阈值20%）")
-
-        if df.empty or not target_ratio_sub:
-            st.info("请先添加标的并设置目标配置比例，以生成调仓建议")
+        if current_token:
+            # 显示当前登录URL
+            login_url = f"{BASE_URL}/show?token={current_token}"
+            st.markdown("您的一键登录URL：")
+            st.code(login_url)
+            
+            # 操作按钮（横向排列）
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("刷新URL", use_container_width=True):
+                    new_token, _ = save_token_to_user(st.session_state.current_username)
+                    new_login_url = f"{BASE_URL}/show?token={new_token}"
+                    st.success(f"URL已刷新：{new_login_url}")
+                    st.rerun()
+            with col2:
+                if st.button("禁用登录", use_container_width=True, type="secondary"):
+                    users_collection.update_one(
+                        {"username": st.session_state.current_username},
+                        {"$set": {"login_token": "", "token_expire": 0}}
+                    )
+                    st.success("一键登录已禁用")
+                    st.rerun()
         else:
-            total_value = df["现有价值"].sum()
-            if total_value == 0:
-                st.warning("所有标的现有价值为0，无法计算调仓建议")
-            else:
-                # 1. 计算当前比例（基于现有价值）和目标偏差
-                category_value = df.groupby("分类")["现有价值"].sum().to_dict()
-                current_ratio = {k: v / total_value for k, v in category_value.items()}
-                
-                adjustment = {}
-                for category in target_ratio_sub:
-                    if category == "机动-现金":
-                        continue
-                    target = target_ratio_sub[category]
-                    current = current_ratio.get(category, 0.0)
-                    diff_ratio = target - current  # 比例偏差（正数需增持，负数需减持）
-                    diff_value = total_value * diff_ratio  # 价值偏差（元）
-                    
-                    # 计算偏差百分比（过滤<20%的调整，阈值改为20%）
-                    deviation_pct = abs(diff_ratio) / target if target > 0 else 1.0
-                    adjustment[category] = {
-                        "目标比例": target,
-                        "当前比例": current,
-                        "比例偏差": diff_ratio,
-                        "价值偏差": diff_value,
-                        "偏差百分比": deviation_pct
-                    }
-                
-                # 过滤偏差<20%的分类（只保留需要调仓的）
-                significant_adj = {
-                    k: v for k, v in adjustment.items() 
-                    if v["偏差百分比"] >= 0.2 and v.get("类型") != "cash"  # 增加排除cash的条件
-                }
-                
-                if not significant_adj:
-                    st.success("所有资产类别偏差均小于20%，当前配置合理，无需调仓")
-                else:
-                    # 2. 大类偏离度展示
-                    st.markdown("### 大类资产偏离度（偏差≥20%）")
-                    major_deviation = {}
-                    for category, adj in significant_adj.items():
-                        major = category.split("-")[0]
-                        major_deviation[major] = major_deviation.get(major, 0.0) + adj["偏差百分比"]
-                    
-                    major_cols = st.columns(len(major_deviation))
-                    for i, (major, dev) in enumerate(major_deviation.items()):
-                        with major_cols[i]:
-                            st.metric(major, f"偏差 {dev:.0%}", "需调仓")
-                    
-                    # 3. 详细调仓建议
-                    st.markdown("### 具体调仓操作建议")
-                    for category, adj in significant_adj.items():
-                        major, minor = category.split("-")
-                        with st.expander(f"{major} - {minor}（偏差 {adj['偏差百分比']:.0%}）", expanded=True):
-                            # 小类层面数据
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                st.write("目标比例")
-                                st.subheader(f"{adj['目标比例']:.0%}")
-                            with col2:
-                                st.write("当前比例")
-                                st.subheader(f"{adj['当前比例']:.0%}")
-                            with col3:
-                                st.write("价值调整")
-                                if adj["价值偏差"] > 0:
-                                    st.subheader(f"🔼 增持 {adj['价值偏差']:.2f}元")
-                                else:
-                                    st.subheader(f"🔽 减持 {abs(adj['价值偏差']):.2f}元")
-                            
-                            # 标的层面建议（优化卖出取整逻辑）
-                            st.write("涉及标的调整（手数）：")
-                            category_assets = df[df["分类"] == category].index.tolist()
-                            if category_assets:
-                                category_total = df.loc[category_assets, "现有价值"].sum()
-                                for asset_name in category_assets:
-                                    # 基础信息获取
-                                    asset_type = df.loc[asset_name, "类型"]  # etf=场内，fund/cash=场外
-                                    current_shares = df.loc[asset_name, "持有份额"]  # 当前持有份额
-                                    unit_value = df.loc[asset_name, "现有价值"] / current_shares if current_shares > 0 else 1.0  # 单位净值
-                                    
-                                    # 计算单个标的需调整的价值（按比例分摊）
-                                    asset_value_ratio = df.loc[asset_name, "现有价值"] / category_total
-                                    asset_adjust_value = adj["价值偏差"] * asset_value_ratio
-                                    
-                                    # 计算调整份额（核心优化点）
-                                    adjust_shares = 0
-                                    shares_info = ""
-                                    if unit_value > 0:
-                                        base_shares = asset_adjust_value / unit_value  # 理论基础份额
-                                        
-                                        # 区分场内/场外 + 增持/减持，优化取整逻辑
-                                        if asset_type == "etf":  # 场内标的（100份整数倍）
-                                            if base_shares > 0:  # 增持
-                                                # 向上取整到100的整数倍（确保达到最低增持需求）
-                                                adjust_shares = (base_shares // 100) * 100
-                                                shares_info = ""
-                                            elif base_shares < 0:  # 减持
-                                                # 向下取整到100的整数倍（不超过预期减持量）
-                                                adjust_shares = (base_shares // 100 + 1) * 100
-                                                # 额外校验：不超过当前持有份额（防止卖空）
-                                                if abs(adjust_shares) > current_shares:
-                                                    adjust_shares = -( (current_shares // 100) * 100 )
-                                                shares_info = ""
-                                        elif asset_type == "fund":  # 场外标的（精确到小数点后2位）
-                                            if base_shares > 0:  # 增持
-                                                adjust_shares = round(base_shares, 2)
-                                                shares_info = ""
-                                            elif base_shares < 0:  # 减持
-                                                adjust_shares = round(base_shares, 2)
-                                                # 额外校验：不超过当前持有份额
-                                                if abs(adjust_shares) > current_shares:
-                                                    adjust_shares = -round(current_shares, 2)
-                                                shares_info = ""
-                                    
-                                    # 显示调仓建议
-                                    if adjust_shares > 0:
-                                        st.info(
-                                            f"- 「{asset_name}」建议增持 {adjust_shares} 份额 {shares_info}\n"
-                                            f"  对应价值：{adjust_shares * unit_value:.2f}元（单位净值：{unit_value:.2f}元）"
-                                        )
-                                    elif adjust_shares < 0:
-                                        st.warning(
-                                            f"- 「{asset_name}」建议减持 {abs(adjust_shares)} 份额 {shares_info}\n"
-                                            f"  对应价值：{abs(adjust_shares) * unit_value:.2f}元（当前持有：{current_shares:.2f}份）"
-                                        )
-                            else:
-                                st.info(f"- 该小类暂无标的，建议新增符合「{minor}」分类的标的")
+            # 未生成令牌时显示生成按钮
+            if st.button("生成一键登录URL", use_container_width=True, type="primary"):
+                token, _ = save_token_to_user(st.session_state.current_username)
+                login_url = f"{BASE_URL}/show?token={token}"
+                st.success(f"URL已生成：{login_url}")
+                st.rerun()
 
-        # 资产分布图表
-        st.subheader("小类资产分布")
-        fig1, ax1 = plt.subplots(figsize=(8, 6))
-        ax1.pie(sub_summary.values, labels=sub_summary.index, autopct="%1.1f%%", startangle=90)
-        ax1.axis("equal")
-        st.pyplot(fig1)
+    # 点击按钮时调用封装的计算函数
+    if st.button("重新计算资产组合", use_container_width=True, type="primary"):
+        assets_info, categories, target_ratio, target_ratio_sub = calculate_portfolio()
+    st.markdown("---")
+    assets_info, categories, target_ratio, target_ratio_sub = calculate_portfolio()
 
-        st.subheader("大类资产分布")
-        fig2, ax2 = plt.subplots(figsize=(8, 6))
-        ax2.pie(cls_summary.values, labels=cls_summary.index, autopct="%1.1f%%", startangle=90)
-        ax2.axis("equal")
-        st.pyplot(fig2)
-        from datetime import datetime, timedelta
-
-        # UTC时间+8小时=北京时间
-        beijing_time = datetime.now()
-        st.caption(f"更新时间：{beijing_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
     # ========== 显示当前持有的标的（更新备注展示） ==========
     st.markdown("---")

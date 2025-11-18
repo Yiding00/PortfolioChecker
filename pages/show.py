@@ -17,8 +17,8 @@ plt.rcParams['axes.unicode_minus']=False
 # 令牌配置（可自定义）
 TOKEN_EXPIRE_DAYS = 30  # 令牌有效期30天
 SECRET_KEY = st.secrets["secret_key"]["secret_key"]  # 加密密钥，建议替换为复杂随机字符串
-BASE_URL = st.secrets["base_url"]["base_url"]
-# BASE_URL = "http://localhost:8501"
+# BASE_URL = st.secrets["base_url"]["base_url"]
+BASE_URL = "http://localhost:8501"
 
 # MongoDB 连接
 @st.cache_resource
@@ -380,7 +380,6 @@ else:
             st.success(f"一键登录URL已生成：{login_url}")
             st.rerun()
 
-    st.caption("自定义资产分类并管理标的，自动计算组合分布与调仓建议")
 
     # 实时读取配置
     assets_info, categories = get_user_config_from_db()

@@ -17,8 +17,8 @@ plt.rcParams['axes.unicode_minus']=False
 # 令牌配置（可自定义）
 TOKEN_EXPIRE_DAYS = 30  # 令牌有效期30天
 SECRET_KEY = st.secrets["secret_key"]["secret_key"]  # 加密密钥，建议替换为复杂随机字符串
-# BASE_URL = st.secrets["base_url"]["base_url"]
-BASE_URL = "http://localhost:8501"
+BASE_URL = st.secrets["base_url"]["base_url"]
+# BASE_URL = "http://localhost:8501"
 
 # MongoDB 连接
 @st.cache_resource

@@ -690,80 +690,88 @@ else:
 
     # 点击按钮时调用封装的计算函数
     if st.button("重新计算资产组合", use_container_width=True, type="primary"):
+        assets_info, categories = get_user_config_from_db()
+        if assets_info:  # 当assets_info是空字典时触发
+            assets_info, categories, target_ratio, target_ratio_sub = calculate_portfolio()
+        else:
+            st.markdown("请先添加新标的！")
+    st.markdown("---")
+
+    assets_info, categories = get_user_config_from_db()
+    target_ratio, target_ratio_sub = flatten_categories(categories)
+    if assets_info:  # 当assets_info不是空字典时触发
         assets_info, categories, target_ratio, target_ratio_sub = calculate_portfolio()
-    st.markdown("---")
-    assets_info, categories, target_ratio, target_ratio_sub = calculate_portfolio()
 
 
-    # ========== 显示当前持有的标的（更新备注展示） ==========
-    st.markdown("---")
-    st.subheader("📋 当前持有")
+        # ========== 显示当前持有的标的（更新备注展示） ==========
+        st.markdown("---")
+        st.subheader("📋 当前持有")
 
-    if not assets_info:
-        st.info("您暂无持有任何标的，可通过上方「添加新标的」功能录入资产")
-    else:
-        # 表头样式
-        st.markdown("""
-        <style>
-        .asset-row {display: flex; align-items: center; padding: 8px 0; border-bottom: 1px solid #eee;}
-        .asset-col {flex: 1; text-align: left; padding: 0 4px;}
-        .asset-col-2 {flex: 2; text-align: left; padding: 0 4px;}
-        .action-btn {flex: 1.2;}
-        </style>
-        """, unsafe_allow_html=True)
-        
-        # 表头
-        st.markdown("""
-        <div class="asset-row font-weight-bold">
-            <div class="asset-col-2">标的名称</div>
-            <div class="asset-col">标的代码</div>
-            <div class="asset-col">类型</div>
-            <div class="asset-col">持有份额</div>
-            <div class="asset-col-2">分类</div>
-            <div class="asset-col-2">备注</div>
-            <div class="asset-col action-btn">操作</div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # 标的列表
-        for asset_name, asset_detail in assets_info.items():
-            col1, col2, col3, col4, col5, col6, col7 = st.columns([2, 1.5, 1, 1.5, 2, 2, 1.5])
-            with col1:
-                st.write(asset_name)
-            with col2:
-                st.write(asset_detail.get("code", ""))
-            with col3:
-                st.write(asset_detail.get("type", ""))
-            with col4:
-                st.write(f"{asset_detail.get('amount', 0.0):.2f}")
-            with col5:
-                st.write(asset_detail.get("category", "").split("-")[1])  # 保持与添加功能一致的分类显示
-            with col6:
-                st.write(asset_detail.get("remark", "无"))
-            with col7:
-                btn_col1, btn_col2 = st.columns(2)
-                with btn_col1:
-                    edit_btn = st.button(
-                        "编辑",
-                        key=f"edit_{asset_name}",
-                        use_container_width=True,
-                        type="secondary"
-                    )
-                with btn_col2:
-                    delete_btn = st.button(
-                        "删除",
-                        key=f"delete_{asset_name}",
-                        use_container_width=True,
-                        type="secondary"
-                    )
-                
-                # 按钮点击逻辑
-                if edit_btn:
-                    st.session_state.edit_asset = asset_name
-                    st.session_state.show_edit = True
-                if delete_btn:
-                    st.session_state.delete_confirm = True
-                    st.session_state.asset_to_delete = asset_name
+        if not assets_info:
+            st.info("您暂无持有任何标的，可通过上方「添加新标的」功能录入资产")
+        else:
+            # 表头样式
+            st.markdown("""
+            <style>
+            .asset-row {display: flex; align-items: center; padding: 8px 0; border-bottom: 1px solid #eee;}
+            .asset-col {flex: 1; text-align: left; padding: 0 4px;}
+            .asset-col-2 {flex: 2; text-align: left; padding: 0 4px;}
+            .action-btn {flex: 1.2;}
+            </style>
+            """, unsafe_allow_html=True)
+            
+            # 表头
+            st.markdown("""
+            <div class="asset-row font-weight-bold">
+                <div class="asset-col-2">标的名称</div>
+                <div class="asset-col">标的代码</div>
+                <div class="asset-col">类型</div>
+                <div class="asset-col">持有份额</div>
+                <div class="asset-col-2">分类</div>
+                <div class="asset-col-2">备注</div>
+                <div class="asset-col action-btn">操作</div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # 标的列表
+            for asset_name, asset_detail in assets_info.items():
+                col1, col2, col3, col4, col5, col6, col7 = st.columns([2, 1.5, 1, 1.5, 2, 2, 1.5])
+                with col1:
+                    st.write(asset_name)
+                with col2:
+                    st.write(asset_detail.get("code", ""))
+                with col3:
+                    st.write(asset_detail.get("type", ""))
+                with col4:
+                    st.write(f"{asset_detail.get('amount', 0.0):.2f}")
+                with col5:
+                    st.write(asset_detail.get("category", "").split("-")[1])  # 保持与添加功能一致的分类显示
+                with col6:
+                    st.write(asset_detail.get("remark", "无"))
+                with col7:
+                    btn_col1, btn_col2 = st.columns(2)
+                    with btn_col1:
+                        edit_btn = st.button(
+                            "编辑",
+                            key=f"edit_{asset_name}",
+                            use_container_width=True,
+                            type="secondary"
+                        )
+                    with btn_col2:
+                        delete_btn = st.button(
+                            "删除",
+                            key=f"delete_{asset_name}",
+                            use_container_width=True,
+                            type="secondary"
+                        )
+                    
+                    # 按钮点击逻辑
+                    if edit_btn:
+                        st.session_state.edit_asset = asset_name
+                        st.session_state.show_edit = True
+                    if delete_btn:
+                        st.session_state.delete_confirm = True
+                        st.session_state.asset_to_delete = asset_name
 
     # ========== 添加新标的功能 ==========
     # 初始隐藏添加表单，通过按钮控制显示状态

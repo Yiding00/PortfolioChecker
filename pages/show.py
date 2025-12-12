@@ -10,6 +10,8 @@ import time
 from data_utils.Ashare import *
 from data_utils.utils import get_fund_price
 
+st.set_page_config(page_title="资产组合查询器", layout="wide")
+
 # ========== 基础配置 ==========
 # 中文字体设置
 mpl.font_manager.fontManager.addfont('font/NotoSansSC-VariableFont_wght.ttf')
@@ -21,6 +23,7 @@ TOKEN_EXPIRE_DAYS = 30  # 令牌有效期30天
 SECRET_KEY = st.secrets["secret_key"]["secret_key"]  # 加密密钥，建议替换为复杂随机字符串
 BASE_URL = st.secrets["base_url"]["base_url"]
 # BASE_URL = "http://localhost:8501"
+# base_url = "https://portfoliochecker.streamlit.app"
 
 # MongoDB 连接
 @st.cache_resource
@@ -242,33 +245,6 @@ def save_categories_to_db(categories):
         st.error(f"保存失败：{str(e)}")
         return False
 
-def check_password():
-    """验证密码并设置登录状态"""
-    input_username = st.session_state.username_input.strip()
-    input_pwd = st.session_state.password_input.strip()
-    
-    if not input_username or not input_pwd:
-        st.error("用户名/邮箱和密码不能为空")
-        return
-    
-    user = users_collection.find_one({"$or": [
-        {"username": input_username},
-        {"email": input_username}
-    ]})
-    
-    if not user:
-        st.error("用户不存在，请检查用户名/邮箱")
-        return
-    
-    if bcrypt.checkpw(input_pwd.encode('utf-8'), user["password"]):
-        st.session_state.logged_in = True
-        st.session_state.current_username = user["username"]
-        st.session_state.username_input = ""
-        st.session_state.password_input = ""
-        st.success(f"欢迎回来，{st.session_state.current_username}！")
-    else:
-        st.error("密码错误，请重试")
-
 def add_asset_to_db(asset_data):
     """添加新标的到数据库"""
     try:
@@ -322,6 +298,18 @@ def delete_asset_from_db(asset_name):
         return False
     
 # ========== 资产组合计算功能 ==========
+@st.cache_data(ttl=300)
+def get_price_cached(code):
+    return get_price(code, frequency="5m", count=1)
+
+@st.cache_data(ttl=300)
+def get_fund_price_cached(code):
+    return get_fund_price(code, count=1)
+
+@st.cache_data(ttl=5)
+def calculate_portfolio_cached():
+    return calculate_portfolio()
+
 def calculate_portfolio():
     # 实时读取配置
     assets_info, categories = get_user_config_from_db()
@@ -344,9 +332,9 @@ def calculate_portfolio():
             source = info["type"]
             amount = info["amount"]
             if source == "fund":
-                A[name] = get_fund_price(code, count=1)
+                A[name] = get_fund_price_cached(code)
             elif source == "etf":
-                A[name] = get_price(code, frequency="5m", count=1)
+                A[name] = get_price_cached(code)
         except Exception as e:
             st.warning(f"获取 {name} 数据失败：{e}")
 
@@ -650,7 +638,6 @@ if not st.session_state.logged_in:
 
 # ========== 已登录状态 ==========
 else:
-    st.set_page_config(page_title="资产组合查询器", layout="wide")
     st.title("📊 实时组合查询器")
     
     # ========== 一键登录管理（封装为下拉按钮） ==========
@@ -692,7 +679,7 @@ else:
     if st.button("重新计算资产组合", use_container_width=True, type="primary"):
         assets_info, categories = get_user_config_from_db()
         if assets_info:  # 当assets_info是空字典时触发
-            assets_info, categories, target_ratio, target_ratio_sub = calculate_portfolio()
+            assets_info, categories, target_ratio, target_ratio_sub = calculate_portfolio_cached()
         else:
             st.markdown("请先添加新标的！")
     st.markdown("---")
@@ -700,7 +687,7 @@ else:
     assets_info, categories = get_user_config_from_db()
     target_ratio, target_ratio_sub = flatten_categories(categories)
     if assets_info:  # 当assets_info不是空字典时触发
-        assets_info, categories, target_ratio, target_ratio_sub = calculate_portfolio()
+        assets_info, categories, target_ratio, target_ratio_sub = calculate_portfolio_cached()
 
 
         # ========== 显示当前持有的标的（更新备注展示） ==========

@@ -306,9 +306,9 @@ def get_price_cached(code):
 def get_fund_price_cached(code):
     return get_fund_price(code, count=1)
 
-@st.cache_data(ttl=5)
-def calculate_portfolio_cached():
-    return calculate_portfolio()
+# @st.cache_data(ttl=5)
+# def calculate_portfolio_cached():
+#     return calculate_portfolio()
 
 def calculate_portfolio():
     # 实时读取配置
@@ -679,7 +679,7 @@ else:
     if st.button("重新计算资产组合", use_container_width=True, type="primary"):
         assets_info, categories = get_user_config_from_db()
         if assets_info:  # 当assets_info是空字典时触发
-            assets_info, categories, target_ratio, target_ratio_sub = calculate_portfolio_cached()
+            assets_info, categories, target_ratio, target_ratio_sub = calculate_portfolio()
         else:
             st.markdown("请先添加新标的！")
     st.markdown("---")
@@ -687,7 +687,7 @@ else:
     assets_info, categories = get_user_config_from_db()
     target_ratio, target_ratio_sub = flatten_categories(categories)
     if assets_info:  # 当assets_info不是空字典时触发
-        assets_info, categories, target_ratio, target_ratio_sub = calculate_portfolio_cached()
+        assets_info, categories, target_ratio, target_ratio_sub = calculate_portfolio()
 
 
         # ========== 显示当前持有的标的（更新备注展示） ==========
